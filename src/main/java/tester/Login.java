@@ -11,7 +11,7 @@ import static org.openqa.selenium.support.ui.ExpectedConditions.stalenessOf;
 public class Login {
 
     public static void admin(WebDriver adriver){
-        WebDriverWait wait = new WebDriverWait(adriver, 10);
+        WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
         adriver.get(testingVariablesPile.getHost());
         wait.until(presenceOfElementLocated(By.tagName("html")));
         WebElement a =adriver.findElement(By.tagName("html"));
@@ -24,7 +24,7 @@ public class Login {
 
         String login = "Bad Client";
         String pass = "@TerriblePass01";
-        WebDriverWait wait = new WebDriverWait(adriver, 10);
+        WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
         adriver.get(testingVariablesPile.getHost());
         wait.until(presenceOfElementLocated(By.tagName("html")));
         WebElement a =adriver.findElement(By.tagName("html"));

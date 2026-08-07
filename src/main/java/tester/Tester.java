@@ -13,7 +13,7 @@ public class Tester {
 
     public static void main(String[] args) {
         WebDriver driver = new ChromeDriver();
-        WebDriverWait wait = new WebDriverWait(driver, 10);
+        WebDriverWait wait = new WebDriverWait(driver, java.time.Duration.ofSeconds(10));
         testingVariablesPile.setAdminPass("pass");
         testingVariablesPile.setAdminlogin("tj@saepiox.com");
         testingVariablesPile.setHost(targethost);

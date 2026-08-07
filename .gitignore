@@ -1,2 +1,7 @@
 # Project exclude paths
 /target/
+
+# Local test-environment runtime artifacts (do not commit binaries/logs)
+testenv/.drivers/
+testenv/.server.log
+testenv/.server.pid

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SaepioX (Local Test Stand-in)</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Login view -->
+    <section id="view-login" class="view">
+      <div class="card login-card">
+        <h1>SaepioX <span class="badge">TEST</span></h1>
+        <p class="muted">Local synthetic stand-in &middot; no production data</p>
+        <div class="field">
+          <label for="login">Username / email</label>
+          <input id="login" type="text" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="off" />
+        </div>
+        <button id="button-submit" type="button">Sign in</button>
+        <p id="login-error" class="error" hidden>Invalid credentials</p>
+        <p class="hint muted">
+          admin: <code>tj@saepiox.com / pass</code><br />
+          tryg: <code>tryg-tester / tryg-test-01</code>
+        </p>
+      </div>
+    </section>
+
+    <!-- Authenticated shell -->
+    <section id="view-shell" class="view" hidden>
+      <header class="topbar">
+        <strong>SaepioX <span class="badge">TEST</span></strong>
+        <nav>
+          <a href="#!dashboard" data-route="dashboard">Dashboard</a>
+          <a href="#!agreement" data-route="agreement">Agreement</a>
+          <a href="#!user-admin" data-route="user-admin">Users</a>
+          <a href="#!tryg" data-route="tryg">Tryg</a>
+        </nav>
+        <span class="spacer"></span>
+        <span id="who" class="muted"></span>
+        <button id="logout" type="button">Log out</button>
+      </header>
+
+      <main>
+        <!-- Dashboard -->
+        <div id="page-dashboard" class="page" hidden>
+          <h2>Dashboard</h2>
+          <table id="dashboard-table" class="grid">
+            <thead><tr><th>Name</th><th>Type</th><th>Currency</th><th>Risk</th></tr></thead>
+            <tbody id="dashboard-rows"></tbody>
+          </table>
+        </div>
+
+        <!-- Agreement -->
+        <div id="page-agreement" class="page" hidden>
+          <h2>Agreement</h2>
+          <div class="toolbar">
+            <button id="add" type="button">Add</button>
+            <button id="update" type="button">Save</button>
+            <button id="delete" type="button">Delete</button>
+            <input id="search" type="text" placeholder="Search…" />
+          </div>
+          <div class="form-row">
+            <label for="name">Name</label>
+            <input id="name" type="text" disabled />
+            <input id="type" type="text" placeholder="Type" />
+            <input id="currency" type="text" placeholder="Currency" />
+            <input id="risk" type="text" placeholder="Risk" />
+            <input id="term" type="text" placeholder="Term" />
+          </div>
+          <table id="agreement-table" class="grid">
+            <thead><tr><th>Name</th><th>Type</th><th>Currency</th></tr></thead>
+            <tbody id="agreement-rows"></tbody>
+          </table>
+        </div>
+
+        <!-- User admin -->
+        <div id="page-user-admin" class="page" hidden>
+          <h2>Users</h2>
+          <div class="toolbar">
+            <button id="add-user" type="button">Add</button>
+            <button id="update-user" type="button">Save</button>
+            <button id="delete-user" type="button">Delete</button>
+          </div>
+          <div class="form-row">
+            <input id="email" type="text" placeholder="Email" />
+            <input id="userName" type="text" placeholder="Username" />
+            <input id="user-name" type="text" placeholder="Name" />
+            <input id="user-password" type="password" placeholder="Password" />
+          </div>
+          <table id="user-table" class="grid">
+            <thead><tr><th>Email</th><th>Username</th><th>Name</th></tr></thead>
+            <tbody id="user-rows"></tbody>
+          </table>
+        </div>
+
+        <!-- Tryg integration (NEW) -->
+        <div id="page-tryg" class="page" hidden>
+          <h2>Tryg Integration <span class="badge badge-tryg">SYNTHETIC</span></h2>
+          <p class="muted">
+            Pulls synthetic Tryg policy data into SaepioX. Stand-in only — no real
+            Tryg systems are contacted.
+          </p>
+          <div class="toolbar">
+            <button id="tryg-connect" type="button">Load Tryg policies</button>
+            <span id="tryg-status" class="pill">idle</span>
+          </div>
+          <table id="tryg-table" class="grid">
+            <thead><tr><th>Policy ID</th><th>Product</th><th>Currency</th><th>Premium</th><th>Status</th></tr></thead>
+            <tbody id="tryg-rows"></tbody>
+          </table>
+        </div>
+      </main>
+    </section>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -15,7 +15,7 @@ public class GenerateUser {
 
     public static void auser(WebDriver adriver) {
         WebElement a = adriver.findElement(By.tagName("iframe"));
-        WebDriverWait wait = new WebDriverWait(adriver, 10);
+        WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
         adriver.navigate().to(testingVariablesPile.getHost() + "#!user-admin");
         wait.until(presenceOfElementLocated(By.id("add")));
         adriver.findElement(By.id("add")).click();
@@ -44,7 +44,7 @@ public class GenerateUser {
     }
     public static void Delete_test_user(WebDriver adriver){
         int i = 1;
-        WebDriverWait wait = new WebDriverWait(adriver, 10);
+        WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
         adriver.navigate().to(testingVariablesPile.getHost() + "#!user-admin");
         wait.until(presenceOfElementLocated(By.id("add")));
         WebElement a = adriver.findElement(By.tagName("html"));

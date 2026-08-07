@@ -21,7 +21,7 @@ public class Agreement {
     public static void createagreement(WebDriver adriver){
 
             adriver.navigate().to(testingVariablesPile.getHost()+"#!agreement");
-            WebDriverWait wait = new WebDriverWait(adriver, 10);
+            WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
             WebElement name = wait.until(presenceOfElementLocated(By.id("name")));
 
             if (name.isEnabled()) {
@@ -58,7 +58,7 @@ public class Agreement {
 
     public static void createAndDestroyAgreement(WebDriver adriver){
             adriver.navigate().to(testingVariablesPile.getHost()+"#!agreement");
-            WebDriverWait wait = new WebDriverWait(adriver, 10);
+            WebDriverWait wait = new WebDriverWait(adriver, java.time.Duration.ofSeconds(10));
             WebElement name = wait.until(presenceOfElementLocated(By.id("name")));
 
             if (name.isEnabled()) {
