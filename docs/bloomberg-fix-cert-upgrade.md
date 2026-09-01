@@ -423,3 +423,88 @@ Not blocking the cert swap, but worth scheduling afterwards:
   support. A managed-platform update is separate work and should not be bundled
   into this cutover.
 - A `t2.micro` is carrying a production trading connection.
+---
+
+# Outcome — cutover completed 2026-09-01
+
+The credential swap is done. `MAP_TRYG_PROD` is live on `610146:5`.
+
+## What was deployed
+
+`bbgfix-source-12`, built by repackaging `bbgfix-source-11` (Route B). 456 zip
+entries in, 456 out; 447 byte-identical; exactly 9 files replaced — the eight
+under `WEB-INF/classes/cert/trygprod/` and one line of `tryg_prod.cfg`
+(`SocketKeyStorePassword`). No compiled class was touched.
+
+```
+s3://elasticbeanstalk-eu-central-1-513132248511/bbgfix-source-12.war
+sha256 d2222a5e9c05716b0b9cbe9f1ffb3b22cb2a90754e5411b151958c7cfdd6c288
+```
+
+Pre-deploy verification against the cert set extracted back out of the finished
+WAR: `CN=610146:5`, sha256WithRSAEncryption, RSA 2048, key matches certificate,
+chain verifies, and `keytool` opens the WAR's keystore using the password from
+the WAR's own config (alias `map_bbg_prod-map_tryg_prod`).
+
+## Timeline
+
+| Time (UTC) | Event |
+|---|---|
+| 06:57:33 | `update-environment` accepted, environment `Updating` |
+| 06:57:42 | Deploying new version to instance |
+| 06:58:33 | Environment update completed, `Ready` / `Green` |
+| 06:58:48 | QuickFIX/J created session `FIX.4.4:MAP_TRYG_PROD->MAP_BBG_PROD` |
+| 06:58:49 | MINA session to `69.191.198.2:8228` |
+| 06:58:50 | Logon request sent; **`Received logon`** |
+
+Total FIX outage roughly 70 seconds.
+
+Confirmed stable a couple of heartbeat intervals later: no further events after
+the logon, no TLS or certificate errors in the event log, and the TCP connection
+to `69.191.198.2:8228` still `ESTAB` on the same local port as the logon.
+
+## What this proves
+
+End to end, on Bloomberg's production endpoint: the new chain is accepted at the
+TLS layer, the keystore and its password pair correctly inside the artifact, and
+Bloomberg accepts the FIX logon on `610146:5`. Nothing about the credential
+remains unverified.
+
+## Still outstanding
+
+1. **Bloomberg console** — confirm `610146:5` Last Usage is advancing and
+   `610146:4` has stopped. The logs prove our side; the console is the
+   authoritative record of theirs.
+2. **Deactivate `610146:4`** once `:5` has been stable for a sensible period. The
+   daily Critical alert stops when the old credential is gone, not when the new
+   one starts being used.
+3. **Route B debt — the important one.** The source repository for
+   `com.saepiox:bbgfix-server` still contains `610146:4`. The next build from
+   source silently reverts this cutover. Land the same cert and config change
+   there before anyone rebuilds.
+
+## Rollback, and when it stops working
+
+Redeploy the previous version:
+
+```
+aws elasticbeanstalk update-environment --environment-name Bbgfix-prod \
+  --version-label bbgfix-source-11 --region eu-central-1
+```
+
+Do not delete `bbgfix-source-11` or its S3 object while that remains useful — but
+note it expires as a rollback on **2026-09-05**, when the legacy `FIX
+Connectivity` CA that `610146:4` chains through goes out of validity. After that
+date, reverting gets you a credential that no longer validates.
+
+## Operational notes for next time
+
+- Deploying must be done with a user principal. The EC2 instance profile
+  (`aws-elasticbeanstalk-ec2-role`) deliberately cannot call
+  `elasticbeanstalk:UpdateEnvironment`, so running the deploy from the FIX host
+  fails with `AccessDenied`. That is correct design, not a misconfiguration.
+- `eb deploy` from a directory with no source will report that it is launching
+  the sample application. It failed on a `ValidationError` before making any call,
+  but do not run `eb deploy` from an empty directory against this environment.
+- No credential material was left staged in S3; the `tmp-cert-test/` prefix is
+  empty.
