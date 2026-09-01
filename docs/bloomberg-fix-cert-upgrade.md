@@ -302,12 +302,70 @@ Look for a `Logon (35=A)` sent **and received back**, then heartbeats settling.
 Then confirm in the Bloomberg console that `610146:5` Last Usage advances and
 `610146:4` stops.
 
-## Rehearsing first
+## Rehearsing: there is no sandbox
 
-The WAR also contains `tryg_beta.cfg` and a `cert/trygbeta/` credential set, so a
-Bloomberg beta/UAT session already exists. That is the place to prove the new chain
-before touching `Bbgfix-prod` — and it is a far better rehearsal than any stub
-server, because it is Bloomberg's own endpoint doing the accepting.
+An earlier revision of this document suggested rehearsing on the existing beta
+session. That was wrong, and the correction matters:
+
+- **There is no BBGFix sandbox environment.** `Bbgfix-prod` is the only Elastic
+  Beanstalk environment for this application. The `Saepiox-sandbox`,
+  `Saepiox-env` and `Saepiox-Nov23` environments belong to a different
+  application (`saepiox`) and have nothing to do with the FIX server.
+- **The beta credential is long dead.** `cert/trygbeta/` holds `607887:1`
+  (FIXID 607887, a different FIXID from production's 610146), which **expired
+  2023-03-04** and was issued under the same legacy `FIX Connectivity` chain
+  being retired. It cannot rehearse anything as it stands.
+
+Making the beta path usable again means asking Bloomberg to issue a fresh
+SHA-256 credential for FIXID 607887 and deploying a beta build to test with. That
+is the right long-term answer, but it depends on Bloomberg's turnaround and is
+unlikely to complete before 2026-09-04.
+
+### The pre-flight test that is available now
+
+Bloomberg's production endpoint will tell you whether it accepts the new
+certificate chain, without starting a FIX session. A TLS handshake alone proves
+client-certificate acceptance; no `Logon (35=A)` is sent, so no second session
+ever claims `MAP_TRYG_PROD` and the live session is untouched.
+
+It must run **from the instance**, because Bloomberg allowlists the source IP:
+
+```
+aws ssm start-session --target i-0a3ccb5eb8eec0d03      # SSM agent is Online
+```
+
+Then, with the new bundle staged in a temporary directory on the box:
+
+```
+openssl s_client -connect 69.191.198.2:8228 \
+  -cert cert.pem -key key.pem -CAfile CACerts.pem -tls1_2 </dev/null
+```
+
+What the result means:
+
+- Handshake completes, `Verify return code: 0 (ok)` — Bloomberg accepts the new
+  credential. This is the assurance the cutover needs.
+- `alert handshake failure` / `bad certificate` — Bloomberg rejects it. Stop, and
+  take it to the helpdesk before deploying anything.
+
+Delete the staged bundle from the instance afterwards; it contains the private
+key. Note also that anything written to the instance filesystem is discarded on
+the next deploy, so this staging is genuinely temporary.
+
+Tell the Bloomberg helpdesk you intend to do this. It is an unsolicited connection
+to a production venue, and it is better announced than explained afterwards.
+
+### Realistic order of assurance
+
+1. `scripts/verify-bbg-cert-bundle.sh` and `scripts/mtls-smoke-test.sh` — offline,
+   seconds, catches a wrong or corrupt bundle.
+2. The `openssl s_client` handshake above, from the instance — proves Bloomberg
+   accepts the new chain.
+3. Deploy to `Bbgfix-prod` in a window, with `bbgfix-source-11` ready to redeploy.
+
+Steps 1 and 2 remove nearly all the risk that a rehearsal environment would have
+removed. Step 3 is where the credential actually changes, and the rollback is what
+makes it safe rather than a rehearsal would have.
 
 ## Security observations
 
