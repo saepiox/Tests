@@ -12,11 +12,30 @@ credential currently in service:
 |---|---|
 | Common Name | `610146:4` |
 | Serial | `efa01428540d89fc894f70aa80e94ea4` |
-| Signature | SHA-1 (being deprecated) |
+| Signature | sha256WithRSAEncryption (see note below) |
 | Expires | **2026-09-04 23:59 UTC** |
 | Last used | 2026-08-17 |
 | CompIDs | `MAP_BBG_PROD` / `MAP_TRYG_PROD` |
 | Environment | PROD |
+
+### Correction: the leaf certificate is not SHA-1
+
+The alert's Detail text reads "SHA-1 Cryptographic Certificates are being
+deprecated", but the deployed `610146:4` leaf is **sha256WithRSAEncryption**, and
+its own X.509 `notAfter` is **2027-03-03**. Reading the certificate alone would
+suggest there is another eighteen months of runway. There is not.
+
+What is actually being retired is the **chain**:
+
+| | Issuer chain | Root signature |
+|---|---|---|
+| `610146:4` (deployed) | `FIX Connectivity` → `System Security Root CA` | sha1WithRSAEncryption |
+| `610146:5` (replacement) | `Bloomberg Connectivity and Integration FIX CA` → `... Root CA` | sha256WithRSAEncryption |
+
+The legacy `FIX Connectivity` CA expires **2026-09-05**, and Bloomberg cuts the
+credentials issued under it on **2026-09-04**. So the 09-04 date is an
+administrative cutoff tied to the CA, not to the leaf's own validity window. Do
+not let the leaf's 2027 expiry date reassure anyone.
 
 ## What the attached bundle actually contains
 
@@ -146,185 +165,159 @@ normal secrets channel and delete local copies afterwards.
 
 ---
 
-# Deploying the new credential to the FIX host on AWS
+# Deploying the new credential — the actual AWS setup
 
-This section covers the actual cutover on the AWS-hosted FIX engine. It is written
-without sight of that environment, so the discovery steps come first — run them and
-the rest becomes specific.
+Discovered from the live environment, not assumed. This supersedes an earlier draft
+of this document that guessed at a keystore on disk managed by systemd. That is not
+how this runs.
 
-## The three things that break this cutover
+## What is actually there
 
-These are the failure modes worth knowing before touching anything. None of them
-are about the certificate itself.
+| | |
+|---|---|
+| Account / region | `513132248511` / `eu-central-1` |
+| Instance | `i-0a3ccb5eb8eec0d03` (`t2.micro`, running) |
+| Managed by | **Elastic Beanstalk** — app `BBGFix`, env `Bbgfix-prod` (`e-t4vvmazk3h`) |
+| Platform | 64bit Amazon Linux 2018.03 v3.4.4, Tomcat 8.5, Java 8 |
+| Live version | `bbgfix-source-11`, deployed 2025-04-04 |
+| Artifact | `s3://elasticbeanstalk-eu-central-1-513132248511/1743756437899-multisession.war` |
 
-**1. Two sessions with the same CompID.** A FIX session is a singleton. If a
-rolling deployment starts the new task before the old one stops, both present
-`MAP_TRYG_PROD` at once. Bloomberg drops one or both, and sequence numbers can end
-up inconsistent. On ECS this means forcing stop-then-start rather than the default
-rolling update:
+There is no `BBGFIX` S3 bucket and there never was one. Elastic Beanstalk keeps
+application bundles in its own `elasticbeanstalk-<region>-<account>` bucket, which
+is where the deployable artifact lives.
 
-```
---deployment-configuration "minimumHealthyPercent=0,maximumPercent=100"
-```
+## The thing that changes the whole procedure
 
-On EC2 with systemd, `systemctl restart` is already stop-then-start, so this is a
-non-issue there. Accept the few seconds of downtime; it is the safe shape.
-
-**2. A lost message store resets sequence numbers.** QuickFIX/J keeps sequence
-state on disk (`FileStorePath`). If that path is inside an ephemeral container
-filesystem, a redeploy starts from sequence 1, Bloomberg expects continuity, and
-the session fails to establish until sequence numbers are reconciled. Confirm the
-store is on persistent storage (EBS volume, or EFS mount for ECS) *before*
-restarting. If it is not, arrange a sequence reset with Bloomberg as part of the
-window rather than discovering it mid-cutover.
-
-**3. The egress IP is registered with Bloomberg.** Bloomberg allowlists the source
-IP. If the FIX host reaches them through a NAT gateway with an Elastic IP, that EIP
-is what they know. Replacing an instance or task is safe as long as egress still
-leaves via the same NAT/EIP; moving subnets or AZs may not be. Check before, not
-after:
+**The certificates are inside the WAR**, not on the instance:
 
 ```
-# from the FIX host itself
-curl -s https://checkip.amazonaws.com
+WEB-INF/classes/cert/trygprod/{pem,jks,pkcs12}/...
+WEB-INF/classes/tryg_prod.cfg
 ```
 
-Compare that against the IP registered in the Bloomberg console. A certificate swap
-does not change this, but a host rebuild during the same window would.
+So this is **not** a copy-a-file-and-restart job. Replacing the credential means
+producing a new WAR and deploying it as a new Elastic Beanstalk application
+version. Anything written onto the instance filesystem is discarded on the next
+deploy, so it is not a fix.
 
-## Step 1 — find the host and the engine
-
-```
-# EC2 instances tagged for FIX (adjust the tag filter to local convention)
-aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=*fix*" \
-  --query 'Reservations[].Instances[].{Id:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,State:State.Name,PrivateIp:PrivateIpAddress}' \
-  --output table
-
-# ECS services, if it runs as a task instead
-aws ecs list-clusters
-aws ecs list-services --cluster <cluster>
-```
-
-Then connect — prefer SSM Session Manager over SSH, no inbound port needed:
+The session config (`WEB-INF/classes/tryg_prod.cfg`) is a QuickFIX/J initiator:
 
 ```
-aws ssm start-session --target <instance-id>
+SenderCompID=MAP_TRYG_PROD      TargetCompID=MAP_BBG_PROD
+BeginString=FIX.4.4             SocketUseSSL=Y   EnabledProtocols=TLSv1.2
+SocketConnectHost=69.191.198.2  SocketConnectPort=8228
+SocketConnectHost1=69.191.230.2 SocketConnectPort1=8228   # failover
+SocketKeyStore=cert/trygprod/jks/cert.jks
+SocketKeyStorePassword=<cleartext in the file>
+ResetOnLogon=Y                  HeartBtInt=60
+StartTime=EndTime=17:00:00 America/New_York
 ```
 
-On the host, identify the engine and its config:
+Two consequences worth noting:
+
+- `ResetOnLogon=Y` means sequence numbers reset on every logon. The usual concern
+  about losing a message store on an ephemeral filesystem does **not** apply here.
+- The keystore password is stored in cleartext in the config file, inside the WAR,
+  in S3. See "Security observations" below.
+
+## Swapping the leaf certificate alone will not work
+
+The deployed `CACerts.pem` contains only the legacy chain (`FIX Connectivity` →
+`System Security Root CA`). The replacement `610146:5` is issued under a different
+chain, and the deployed truststore cannot validate it:
 
 ```
-systemctl list-units --type=service | grep -i fix
-ps -ef | grep -iE 'quickfix|fix|java' | grep -v grep
-# the config path is usually a -D property or a CLI arg on the java process
+$ openssl verify -CAfile <deployed>/CACerts.pem <new>/cert.pem
+error 20 at 0 depth lookup: unable to get local issuer certificate
 ```
 
-## Step 2 — locate the current keystore and password
+Replace the **entire** `cert/trygprod/` directory from the new bundle — `cert.pem`,
+`key.pem`, `CACerts.pem`, `cert.jks`, `cert.pfx` — not just the leaf. The new
+bundle's `CACerts.pem` carries both the new and the legacy chains, so it stays
+valid for the old credential during the rollback window.
 
-In a QuickFIX/J config (`.cfg`) the relevant keys are:
+And update `SocketKeyStorePassword` in `tryg_prod.cfg`: the new bundle ships its
+own keystore password, which is **not** the current one.
 
-```
-SocketUseSSL=Y
-SocketKeyStore=/opt/fix/certs/cert.jks
-SocketKeyStorePassword=...
-SocketTrustStore=/opt/fix/certs/truststore.jks
-SocketTrustStorePassword=...
-```
+## Two routes to a new WAR
 
-The password may instead arrive from Secrets Manager or SSM Parameter Store at
-startup. Check the unit file or task definition:
+**Route A — rebuild from source (correct).** The artifact is Maven
+`com.saepiox:bbgfix-server:0.0.1-SNAPSHOT`. The WAR ships compiled classes only
+(81 `.class` files, zero `.java`), so the source lives in another repository.
+Replace the cert resources and the config there, build, deploy. This keeps the
+repository as the source of truth.
 
-```
-systemctl cat <fix-service> | grep -iE 'secret|ssm|environment|ExecStart'
-aws ecs describe-task-definition --task-definition <family> \
-  --query 'taskDefinition.containerDefinitions[].secrets'
-```
+**Route B — repackage the existing WAR (fast).** A WAR is a zip, and everything
+that must change is a resource, not code. Swap `cert/trygprod/*` and
+`tryg_prod.cfg` inside the existing artifact, then upload the result as a new
+application version. No compiler, no source access.
 
-Whichever it is, the new bundle has its **own** password — a different 22-character
-string from the current one. Updating the keystore without updating the password is
-the most likely way to fail this cutover.
+Route B carries a real cost: the source repository still holds the old
+certificate, so the next genuine build from source silently reverts the credential.
+If Route B is used because of the deadline, raise a follow-up to land the same
+change in source immediately afterwards.
 
-## Step 3 — back up, then stage
+## Deploying
 
-```
-sudo cp -a /opt/fix/certs /opt/fix/certs.bak-$(date +%Y%m%d)
-```
-
-Keep the old keystore in place under a distinct name. Do not overwrite it — it is
-the rollback.
-
-Copy the new bundle to the host (via S3 with a short-lived object, or SSM, not by
-pasting a private key into a terminal that logs), then validate it in situ:
+Elastic Beanstalk deploys are the supported path. Do not edit files on the
+instance.
 
 ```
-scripts/verify-bbg-cert-bundle.sh /path/to/extracted-bundle
-scripts/mtls-smoke-test.sh        /path/to/extracted-bundle
+# upload the new artifact
+aws s3 cp multisession.war \
+  s3://elasticbeanstalk-eu-central-1-513132248511/<new-key>.war
+
+# register it as an application version
+aws elasticbeanstalk create-application-version \
+  --application-name BBGFix \
+  --version-label bbgfix-source-12 \
+  --source-bundle S3Bucket=elasticbeanstalk-eu-central-1-513132248511,S3Key=<new-key>.war
+
+# deploy it
+aws elasticbeanstalk update-environment \
+  --environment-name Bbgfix-prod \
+  --version-label bbgfix-source-12
 ```
 
-Both must pass before the restart. They take seconds and catch a wrong or truncated
-bundle while rollback is still trivial.
+Rollback is the same call with `--version-label bbgfix-source-11`, which is why
+that version must not be deleted. This is a far cleaner rollback than restoring
+files by hand, and it stays available until Bloomberg deactivates `610146:4`.
 
-## Step 4 — update the secret, then the config
+The environment is a single-instance autoscaling group, so a deploy stops and
+starts the one instance. There is no window in which two logons share
+`MAP_TRYG_PROD`. Expect a short disconnect and an automatic reconnect
+(`ReconnectInterval=60`).
 
-If the password lives in Secrets Manager:
+## Verifying
 
-```
-aws secretsmanager put-secret-value \
-  --secret-id <fix/keystore/password> \
-  --secret-string file://password.txt
-```
-
-If in SSM Parameter Store:
-
-```
-aws ssm put-parameter --name /fix/keystore/password \
-  --value "$(cat password.txt)" --type SecureString --overwrite
-```
-
-Then point the config at the new keystore. Keep the old value commented beside it so
-the rollback is a one-line edit rather than a memory exercise.
-
-Delete the local `password.txt` and the extracted bundle from the host afterwards.
-
-## Step 5 — restart in the window
+`FileLogPath=/var/log`, and the `.ebextensions` files pull the FIX event and
+message logs into EB log bundles:
 
 ```
-# EC2 / systemd
-sudo systemctl restart <fix-service>
-sudo journalctl -u <fix-service> -f
-
-# ECS — register the new revision, then force stop-then-start
-aws ecs update-service --cluster <cluster> --service <svc> \
-  --task-definition <family>:<new-revision> \
-  --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100" \
-  --force-new-deployment
+aws elasticbeanstalk request-environment-info  --environment-name Bbgfix-prod --info-type tail
+aws elasticbeanstalk retrieve-environment-info --environment-name Bbgfix-prod --info-type tail
 ```
 
-## Step 6 — verify
+Look for a `Logon (35=A)` sent **and received back**, then heartbeats settling.
+Then confirm in the Bloomberg console that `610146:5` Last Usage advances and
+`610146:4` stops.
 
-Three independent confirmations, in order:
+## Rehearsing first
 
-1. **TLS handshake succeeded** — the log shows no `SSLHandshakeException`, no
-   `bad_certificate` alert.
-2. **Logon accepted** — a FIX `Logon (35=A)` sent and a `Logon` received back, then
-   `Heartbeat (35=0)` exchange settling into rhythm. A handshake without a logon
-   means Bloomberg accepted the TLS but rejected the session.
-3. **Bloomberg console agrees** — `610146:5` **Last Usage Time** starts advancing
-   and `610146:4` stops. This is the authoritative confirmation; the logs only show
-   our side of it.
+The WAR also contains `tryg_beta.cfg` and a `cert/trygbeta/` credential set, so a
+Bloomberg beta/UAT session already exists. That is the place to prove the new chain
+before touching `Bbgfix-prod` — and it is a far better rehearsal than any stub
+server, because it is Bloomberg's own endpoint doing the accepting.
 
-Watch through at least two heartbeat intervals before calling it done. An immediate
-logon followed by a disconnect thirty seconds later is a different failure than a
-clean logon.
+## Security observations
 
-## Rollback
+Not blocking the cert swap, but worth scheduling afterwards:
 
-Point the config back at the backed-up keystore, restore the old password in the
-secret store, restart. Valid until 2026-09-04, and only until then — which is the
-reason for going before the deadline rather than after it.
-
-## After it is stable
-
-Ask Bloomberg to deactivate `610146:4`. The daily Critical alert stops when the
-SHA-1 credential is gone, not when the new one starts being used.
+- The production keystore password sits in cleartext in `tryg_prod.cfg` inside the
+  WAR. Every copy of the artifact in S3 carries it, alongside the private key. The
+  bucket is not public and is encrypted at rest (AES256), but it has no Block
+  Public Access configuration.
+- The platform — Amazon Linux 2018.03, Tomcat 8.5, Java 8 — is long out of
+  support. A managed-platform update is separate work and should not be bundled
+  into this cutover.
+- A `t2.micro` is carrying a production trading connection.
