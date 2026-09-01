@@ -143,3 +143,188 @@ The bundle contains a live PROD private key and keystore password. It must not
 be committed to this repository or any other. `.gitignore` blocks the usual
 filenames, but that is a backstop, not a control — move the bundle through the
 normal secrets channel and delete local copies afterwards.
+
+---
+
+# Deploying the new credential to the FIX host on AWS
+
+This section covers the actual cutover on the AWS-hosted FIX engine. It is written
+without sight of that environment, so the discovery steps come first — run them and
+the rest becomes specific.
+
+## The three things that break this cutover
+
+These are the failure modes worth knowing before touching anything. None of them
+are about the certificate itself.
+
+**1. Two sessions with the same CompID.** A FIX session is a singleton. If a
+rolling deployment starts the new task before the old one stops, both present
+`MAP_TRYG_PROD` at once. Bloomberg drops one or both, and sequence numbers can end
+up inconsistent. On ECS this means forcing stop-then-start rather than the default
+rolling update:
+
+```
+--deployment-configuration "minimumHealthyPercent=0,maximumPercent=100"
+```
+
+On EC2 with systemd, `systemctl restart` is already stop-then-start, so this is a
+non-issue there. Accept the few seconds of downtime; it is the safe shape.
+
+**2. A lost message store resets sequence numbers.** QuickFIX/J keeps sequence
+state on disk (`FileStorePath`). If that path is inside an ephemeral container
+filesystem, a redeploy starts from sequence 1, Bloomberg expects continuity, and
+the session fails to establish until sequence numbers are reconciled. Confirm the
+store is on persistent storage (EBS volume, or EFS mount for ECS) *before*
+restarting. If it is not, arrange a sequence reset with Bloomberg as part of the
+window rather than discovering it mid-cutover.
+
+**3. The egress IP is registered with Bloomberg.** Bloomberg allowlists the source
+IP. If the FIX host reaches them through a NAT gateway with an Elastic IP, that EIP
+is what they know. Replacing an instance or task is safe as long as egress still
+leaves via the same NAT/EIP; moving subnets or AZs may not be. Check before, not
+after:
+
+```
+# from the FIX host itself
+curl -s https://checkip.amazonaws.com
+```
+
+Compare that against the IP registered in the Bloomberg console. A certificate swap
+does not change this, but a host rebuild during the same window would.
+
+## Step 1 — find the host and the engine
+
+```
+# EC2 instances tagged for FIX (adjust the tag filter to local convention)
+aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=*fix*" \
+  --query 'Reservations[].Instances[].{Id:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,State:State.Name,PrivateIp:PrivateIpAddress}' \
+  --output table
+
+# ECS services, if it runs as a task instead
+aws ecs list-clusters
+aws ecs list-services --cluster <cluster>
+```
+
+Then connect — prefer SSM Session Manager over SSH, no inbound port needed:
+
+```
+aws ssm start-session --target <instance-id>
+```
+
+On the host, identify the engine and its config:
+
+```
+systemctl list-units --type=service | grep -i fix
+ps -ef | grep -iE 'quickfix|fix|java' | grep -v grep
+# the config path is usually a -D property or a CLI arg on the java process
+```
+
+## Step 2 — locate the current keystore and password
+
+In a QuickFIX/J config (`.cfg`) the relevant keys are:
+
+```
+SocketUseSSL=Y
+SocketKeyStore=/opt/fix/certs/cert.jks
+SocketKeyStorePassword=...
+SocketTrustStore=/opt/fix/certs/truststore.jks
+SocketTrustStorePassword=...
+```
+
+The password may instead arrive from Secrets Manager or SSM Parameter Store at
+startup. Check the unit file or task definition:
+
+```
+systemctl cat <fix-service> | grep -iE 'secret|ssm|environment|ExecStart'
+aws ecs describe-task-definition --task-definition <family> \
+  --query 'taskDefinition.containerDefinitions[].secrets'
+```
+
+Whichever it is, the new bundle has its **own** password — a different 22-character
+string from the current one. Updating the keystore without updating the password is
+the most likely way to fail this cutover.
+
+## Step 3 — back up, then stage
+
+```
+sudo cp -a /opt/fix/certs /opt/fix/certs.bak-$(date +%Y%m%d)
+```
+
+Keep the old keystore in place under a distinct name. Do not overwrite it — it is
+the rollback.
+
+Copy the new bundle to the host (via S3 with a short-lived object, or SSM, not by
+pasting a private key into a terminal that logs), then validate it in situ:
+
+```
+scripts/verify-bbg-cert-bundle.sh /path/to/extracted-bundle
+scripts/mtls-smoke-test.sh        /path/to/extracted-bundle
+```
+
+Both must pass before the restart. They take seconds and catch a wrong or truncated
+bundle while rollback is still trivial.
+
+## Step 4 — update the secret, then the config
+
+If the password lives in Secrets Manager:
+
+```
+aws secretsmanager put-secret-value \
+  --secret-id <fix/keystore/password> \
+  --secret-string file://password.txt
+```
+
+If in SSM Parameter Store:
+
+```
+aws ssm put-parameter --name /fix/keystore/password \
+  --value "$(cat password.txt)" --type SecureString --overwrite
+```
+
+Then point the config at the new keystore. Keep the old value commented beside it so
+the rollback is a one-line edit rather than a memory exercise.
+
+Delete the local `password.txt` and the extracted bundle from the host afterwards.
+
+## Step 5 — restart in the window
+
+```
+# EC2 / systemd
+sudo systemctl restart <fix-service>
+sudo journalctl -u <fix-service> -f
+
+# ECS — register the new revision, then force stop-then-start
+aws ecs update-service --cluster <cluster> --service <svc> \
+  --task-definition <family>:<new-revision> \
+  --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100" \
+  --force-new-deployment
+```
+
+## Step 6 — verify
+
+Three independent confirmations, in order:
+
+1. **TLS handshake succeeded** — the log shows no `SSLHandshakeException`, no
+   `bad_certificate` alert.
+2. **Logon accepted** — a FIX `Logon (35=A)` sent and a `Logon` received back, then
+   `Heartbeat (35=0)` exchange settling into rhythm. A handshake without a logon
+   means Bloomberg accepted the TLS but rejected the session.
+3. **Bloomberg console agrees** — `610146:5` **Last Usage Time** starts advancing
+   and `610146:4` stops. This is the authoritative confirmation; the logs only show
+   our side of it.
+
+Watch through at least two heartbeat intervals before calling it done. An immediate
+logon followed by a disconnect thirty seconds later is a different failure than a
+clean logon.
+
+## Rollback
+
+Point the config back at the backed-up keystore, restore the old password in the
+secret store, restart. Valid until 2026-09-04, and only until then — which is the
+reason for going before the deadline rather than after it.
+
+## After it is stable
+
+Ask Bloomberg to deactivate `610146:4`. The daily Critical alert stops when the
+SHA-1 credential is gone, not when the new one starts being used.
