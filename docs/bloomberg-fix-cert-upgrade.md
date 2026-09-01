@@ -321,51 +321,95 @@ SHA-256 credential for FIXID 607887 and deploying a beta build to test with. Tha
 is the right long-term answer, but it depends on Bloomberg's turnaround and is
 unlikely to complete before 2026-09-04.
 
-### The pre-flight test that is available now
+### The pre-flight test — run, and it closed the question
 
-Bloomberg's production endpoint will tell you whether it accepts the new
-certificate chain, without starting a FIX session. A TLS handshake alone proves
-client-certificate acceptance; no `Logon (35=A)` is sent, so no second session
-ever claims `MAP_TRYG_PROD` and the live session is untouched.
+Bloomberg's production endpoint will state which client-certificate CAs it accepts
+during a TLS handshake, before any FIX session exists. No `Logon (35=A)` is sent,
+so nothing ever claims `MAP_TRYG_PROD` twice and the live session is untouched.
 
-It must run **from the instance**, because Bloomberg allowlists the source IP:
-
-```
-aws ssm start-session --target i-0a3ccb5eb8eec0d03      # SSM agent is Online
-```
-
-Then, with the new bundle staged in a temporary directory on the box:
+It has to run **from the instance**, because Bloomberg allowlists the source IP.
+SSM Session Manager is available (agent Online, `AmazonSSMManagedInstanceCore`
+attached), and the currently deployed credential is already on the box, so this
+needs nothing staged:
 
 ```
-openssl s_client -connect 69.191.198.2:8228 \
-  -cert cert.pem -key key.pem -CAfile CACerts.pem -tls1_2 </dev/null
+aws ssm start-session --target i-0a3ccb5eb8eec0d03 --region eu-central-1
+
+D=/var/lib/tomcat8/webapps/ROOT/WEB-INF/classes/cert/trygprod/pem
+sudo openssl s_client -connect 69.191.198.2:8228 \
+  -cert $D/cert.pem -key $D/key.pem -CAfile $D/CACerts.pem \
+  -tls1_2 </dev/null
 ```
 
-What the result means:
+**Executed 2026-09-01 from `i-0a3ccb5eb8eec0d03`. Handshake completed:**
+`Verify return code: 0 (ok)`, TLSv1.2, `ECDHE-RSA-AES256-GCM-SHA384`. So the
+endpoint is reachable, the egress IP is allowlisted, and the current credential
+still works.
 
-- Handshake completes, `Verify return code: 0 (ok)` — Bloomberg accepts the new
-  credential. This is the assurance the cutover needs.
-- `alert handshake failure` / `bad certificate` — Bloomberg rejects it. Stop, and
-  take it to the helpdesk before deploying anything.
+The valuable part was not the pass, but what the server advertised in its
+**Acceptable client certificate CA names**:
 
-Delete the staged bundle from the instance afterwards; it contains the private
-key. Note also that anything written to the instance filesystem is discarded on
-the next deploy, so this staging is genuinely temporary.
+```
+/CN=System Security Root CA                          <- legacy root
+/CN=FIX Connectivity                                  <- issuer of 610146:4 (current)
+/CN=Bloomberg Connectivity and Integration FIX CA     <- issuer of 610146:5 (new)
+/CN=Bloomberg Connectivity and Integration Root CA    <- new root
+/CN=FIX Connectivity 2025
+```
 
-Tell the Bloomberg helpdesk you intend to do this. It is an unsolicited connection
-to a production venue, and it is better announced than explained afterwards.
+Bloomberg's **production** endpoint already accepts client certificates issued
+under `Bloomberg Connectivity and Integration FIX CA` — exactly the issuer of the
+replacement credential. That is server-side confirmation that the new chain is
+accepted, obtained without presenting the new certificate at all.
 
-### Realistic order of assurance
+This was the one genuine unknown in the cutover. It is now closed: the risk of
+Bloomberg rejecting the new chain is gone.
+
+### The truststore swap cannot break server validation
+
+The new `CACerts.pem` is a strict superset of the deployed one. Both anchors
+currently in use are byte-identical between the two bundles:
+
+| Trust anchor | Deployed | New bundle |
+|---|---|---|
+| `FIX Connectivity` | `29402510C076…` | `29402510C076…` |
+| `System Security Root CA` | `8E850BFD0F34…` | `8E850BFD0F34…` |
+
+(SHA-256 fingerprints, truncated.) The new bundle adds
+`Bloomberg Connectivity and Integration` FIX CA, Root CA and Server Root CA.
+
+Bloomberg currently presents `fixprod.bloomberg.com` issued by
+`FIX Connectivity 2025`, which anchors on `System Security Root CA` — a root that
+survives the swap unchanged. So replacing the truststore is safe in the server
+direction as well as the client direction, and the added Server Root CA covers
+Bloomberg rotating their own chain later.
+
+Note that Bloomberg has already rotated their server intermediate to
+`FIX Connectivity 2025`; the deployed truststore handles it only because it still
+anchors on the old root.
+
+### What is still unproven
+
+Nothing cryptographic. TLS will accept `610146:5`.
+
+What remains is an entitlement question the console alone can answer: **is
+`610146:5` marked Active on FIXID 610146, with `610146:4` still active as
+fallback?** Confirm that before the window. After that the cutover is a
+scheduling decision, not a technical risk.
+
+### Order of assurance
 
 1. `scripts/verify-bbg-cert-bundle.sh` and `scripts/mtls-smoke-test.sh` — offline,
-   seconds, catches a wrong or corrupt bundle.
-2. The `openssl s_client` handshake above, from the instance — proves Bloomberg
-   accepts the new chain.
-3. Deploy to `Bbgfix-prod` in a window, with `bbgfix-source-11` ready to redeploy.
+   seconds, catches a wrong or corrupt bundle. **Done, passed.**
+2. TLS handshake from the instance — proves reachability and, via the advertised
+   CA names, that Bloomberg accepts the new chain. **Done 2026-09-01, passed.**
+3. Console check that `610146:5` is Active. **Outstanding.**
+4. Deploy to `Bbgfix-prod` in a window, with `bbgfix-source-11` ready to redeploy.
 
-Steps 1 and 2 remove nearly all the risk that a rehearsal environment would have
-removed. Step 3 is where the credential actually changes, and the rollback is what
-makes it safe rather than a rehearsal would have.
+Re-running step 2 with the new bundle presented is optional. It would confirm the
+key and certificate pair against Bloomberg's endpoint, but the advertised CA names
+already establish chain acceptance, and TLS cannot answer the entitlement question
+that step 3 covers.
 
 ## Security observations
 
