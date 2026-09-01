@@ -1,2 +1,15 @@
 # Project exclude paths
 /target/
+
+# Certificate and credential material - never commit these.
+# Bloomberg FIX bundles contain a live private key and keystore password.
+*.pem
+*.jks
+*.pfx
+*.p12
+*.key
+*.crt
+*.der
+password.txt
+MAP_TRYG_*.zip
+MAP_BBG_*.zip
